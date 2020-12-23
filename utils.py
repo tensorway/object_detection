@@ -14,7 +14,6 @@ def draw_bounding_box(tensor, bboxes, strings, color=None, width=1, font_size=No
     draw = ImageDraw.Draw(im)
     img_h = tensor.shape[1]
     if font_size is None:
-        # print(tensor.shape)
         font_size = int(25/600*img_h)
     font = ImageFont.truetype("font.otf", font_size)
 
@@ -43,7 +42,7 @@ def draw_bounding_box(tensor, bboxes, strings, color=None, width=1, font_size=No
     from numpy import array as to_numpy_array
     return torch.from_numpy(to_numpy_array(im))
 
-def visualize_img(img, annotation, cats=["null" for i in range(1000)], color=None, width=3, font_size=None):
+def visualize_img(img, annotation, cats=["null" for i in range(1000)], color=None, width=3, font_size=None, visualize=True):
     if type(img) != type(torch.tensor([0])):
         img = transforms.ToTensor()(img)
     if img.shape[0] < 3:
@@ -56,9 +55,9 @@ def visualize_img(img, annotation, cats=["null" for i in range(1000)], color=Non
         bboxes.append(ann2)
         strings.append(cats[ann['category_id']])
 
-
     img = draw_bounding_box(img, bboxes, strings, color=color, width=width, font_size=font_size)
-    plt.imshow(img.numpy())
+    if visualize:
+        plt.imshow(img.numpy())
     return img.numpy()
 
 
@@ -105,7 +104,6 @@ def batching_func(l, n_classes, n_anchors, final_grid_size_i, final_grid_size_j,
             offset_j = cellj - j
             normalized_w = math.sqrt(bbox[2]/w)
             normalized_h = math.sqrt(bbox[3]/h)
-            # print(idiv, jdiv, i, j, offset_i, offset_j, w, h, final_grid_size_i, final_grid_size_j)
 
             class_ids[el, class_id, i, j] = 1
             objectness[el, lasti, i, j] = 1
@@ -121,51 +119,34 @@ def batching_func(l, n_classes, n_anchors, final_grid_size_i, final_grid_size_j,
 def yolo_visualize(
     model,
     img,
-    final_grid_size_i=9,
-    final_grid_size_j=9,
-    scaled_img_height=288,
-    scaled_img_width=288,
+    scaled_img_height=None,
+    scaled_img_width=None,
     cats=[str(i) for i in range(1000)],
-    thres = 0.5,
-    ann={},
+    thres = 0.85,
+    annotations=None,
     width_bbox=1,
+    color=None,
     font_size=None,
-    transform_f = lambda img, ann: (torch.tensor(img), ann),
-    batching_func = lambda l: (l[0][0], l[0][1])
-):
-
-    tens, ann = transform_f(img, ann)
-    imgs, _ = batching_func([[tens, ann]])
-    model.eval()
-    preds_class_ids, preds_objectness, preds_offsets, preds_normalized_wh = model(imgs)
-    model.train()
-
-    objectness = preds_objectness.squeeze(0).squeeze(0)
-    class_id   = th.argmax(preds_class_ids, dim=1).squeeze(0)
-    class_prob = th.max(preds_class_ids, dim=1)[0].squeeze(0)
-    prob = objectness     
-    
-    anns = []
-    annotations = []
-    for i in range(final_grid_size_i):
-        for j in range(final_grid_size_j):
-            if prob[i, j].item() > thres:
-                centy = (i+preds_offsets[0, 0, i, j]).item()*scaled_img_height/final_grid_size_i
-                centx = (j+preds_offsets[0, 1, i, j]).item()*scaled_img_width /final_grid_size_j
-                width = th.square(preds_normalized_wh[0, 0, i, j]).item() * scaled_img_width
-                height= th.square(preds_normalized_wh[0, 1, i, j]).item() * scaled_img_height
-                top_left_x = centx-width/2
-                top_left_y = centy-height/2
-                bbox = [top_left_x, top_left_y, width, height]
-                category_id = int(class_id[i, j].item())
-                ann_tmp = {'bbox':bbox, 'category_id':category_id}
-                annotations.append(ann_tmp)
+    visualize=True,
+    device=torch.device('cuda')
+    ):
+    if type(img) != type(th.tensor([1])) and img is not None:
+        img = transforms.ToTensor()(img.to(device))
+    img = img.to(device)
+    if scaled_img_height is None or scaled_img_width is None:
+        scaled_img_height = img.shape[1]
+        scaled_img_width = img.shape[2]
+    if annotations is None:
+        imgs = img.unsqueeze(0)
+        model.eval()
+        yolo_output = model(imgs)
+        model.train()
+        annotations = tensors2annotations(yolo_output, thres, scaled_img_height, scaled_img_width)  
                 
-    offsets    = preds_offsets.squeeze(0)
-    img = transforms.ToPILImage()(img)
+    img = transforms.ToPILImage()(img.cpu())
     small_img = transforms.Resize((scaled_img_height, scaled_img_width))(img)
-    annotated_img = visualize_img(small_img, annotations, cats=cats, width=width_bbox, font_size=font_size)
-    return annotated_img, (class_id, class_prob, objectness)
+    annotated_img = visualize_img(small_img, annotations, cats=cats, width=width_bbox, font_size=font_size, color=color, visualize=visualize)
+    return annotated_img
 
 
 def yolo_visualize_tensors(class_id, class_prob, objectness):
@@ -177,18 +158,23 @@ def yolo_visualize_tensors(class_id, class_prob, objectness):
     plt.imshow(class_prob.cpu().detach().numpy())
 
 
-def tensors2annotations(yolo_output, ):
+def tensors2annotations(
+    yolo_output, 
+    thres = 0.85,
+    scaled_img_height = 288,
+    scaled_img_width = 288
+    ):
     preds_class_ids, preds_objectness, preds_offsets, preds_normalized_wh = yolo_output
     objectness = preds_objectness.squeeze(0).squeeze(0)
     class_id   = th.argmax(preds_class_ids, dim=1).squeeze(0)
     class_prob = th.max(preds_class_ids, dim=1)[0].squeeze(0)
-    prob = objectness     
+    final_grid_size_i = int(objectness.shape[0])
+    final_grid_size_j = int(objectness.shape[1])
     
-    anns = []
     annotations = []
     for i in range(final_grid_size_i):
         for j in range(final_grid_size_j):
-            if prob[i, j].item() > thres:
+            if objectness[i, j].item() > thres:
                 centy = (i+preds_offsets[0, 0, i, j]).item()*scaled_img_height/final_grid_size_i
                 centx = (j+preds_offsets[0, 1, i, j]).item()*scaled_img_width /final_grid_size_j
                 width = th.square(preds_normalized_wh[0, 0, i, j]).item() * scaled_img_width
@@ -197,7 +183,8 @@ def tensors2annotations(yolo_output, ):
                 top_left_y = centy-height/2
                 bbox = [top_left_x, top_left_y, width, height]
                 category_id = int(class_id[i, j].item())
-                ann_tmp = {'bbox':bbox, 'category_id':category_id}
+                confidence = class_prob[i, j].item()*objectness[i, j].item()
+                ann_tmp = {'bbox':bbox, 'category_id':category_id, 'confidence':confidence}
                 annotations.append(ann_tmp)
 
     return annotations
