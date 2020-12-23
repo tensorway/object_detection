@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 
 
 def draw_bounding_box(tensor, bboxes, strings, color=None, width=1, font_size=None):
-
     from PIL import Image, ImageDraw, ImageFont
     ndarr = tensor.mul(255).add_(0.5).clamp_(0, 255).permute(
         1, 2, 0).to('cpu', torch.uint8).numpy()
@@ -42,7 +41,9 @@ def draw_bounding_box(tensor, bboxes, strings, color=None, width=1, font_size=No
     from numpy import array as to_numpy_array
     return torch.from_numpy(to_numpy_array(im))
 
-def visualize_img(img, annotation, cats=["null" for i in range(1000)], color=None, width=3, font_size=None, visualize=True):
+
+
+def visualize_img(img, annotation, cats=[str(i) for i in range(1000)], color=None, width=3, font_size=None, visualize=True):
     if type(img) != type(torch.tensor([0])):
         img = transforms.ToTensor()(img)
     if img.shape[0] < 3:
@@ -53,12 +54,18 @@ def visualize_img(img, annotation, cats=["null" for i in range(1000)], color=Non
         ann2 = ann['bbox']
         ann2 = ann2[0], ann2[1], ann2[0]+ann2[2], ann2[1]+ann2[3]
         bboxes.append(ann2)
-        strings.append(cats[ann['category_id']])
+        s = cats[ann['category_id']]
+        try:
+            s += " --" + str(int(ann['confidence']*1000)/10)+"%"
+        except:
+            pass
+        strings.append(s)
 
     img = draw_bounding_box(img, bboxes, strings, color=color, width=width, font_size=font_size)
     if visualize:
         plt.imshow(img.numpy())
     return img.numpy()
+
 
 
 def save(model, name, major, minor):
@@ -122,7 +129,8 @@ def yolo_visualize(
     scaled_img_height=None,
     scaled_img_width=None,
     cats=[str(i) for i in range(1000)],
-    thres = 0.85,
+    thres_detection = 0.85,
+    thres_non_max = 0.6,
     annotations=None,
     width_bbox=1,
     color=None,
@@ -131,17 +139,18 @@ def yolo_visualize(
     device=torch.device('cuda')
     ):
     if type(img) != type(th.tensor([1])) and img is not None:
-        img = transforms.ToTensor()(img.to(device))
+        img = transforms.ToTensor()(img) #.to(device))
     img = img.to(device)
     if scaled_img_height is None or scaled_img_width is None:
-        scaled_img_height = img.shape[1]
-        scaled_img_width = img.shape[2]
+        scaled_img_height = img.shape[-2]
+        scaled_img_width = img.shape[-1]
     if annotations is None:
         imgs = img.unsqueeze(0)
         model.eval()
         yolo_output = model(imgs)
         model.train()
-        annotations = tensors2annotations(yolo_output, thres, scaled_img_height, scaled_img_width)  
+        annotations = tensors2annotations(yolo_output, thres_detection, scaled_img_height, scaled_img_width)
+        annotations = non_max_supression(annotations, thres=thres_non_max)[0]
                 
     img = transforms.ToPILImage()(img.cpu())
     small_img = transforms.Resize((scaled_img_height, scaled_img_width))(img)
@@ -164,33 +173,72 @@ def tensors2annotations(
     scaled_img_height = 288,
     scaled_img_width = 288
     ):
-    preds_class_ids, preds_objectness, preds_offsets, preds_normalized_wh = yolo_output
-    objectness = preds_objectness.squeeze(0).squeeze(0)
-    class_id   = th.argmax(preds_class_ids, dim=1).squeeze(0)
-    class_prob = th.max(preds_class_ids, dim=1)[0].squeeze(0)
-    final_grid_size_i = int(objectness.shape[0])
-    final_grid_size_j = int(objectness.shape[1])
-    
-    annotations = []
-    for i in range(final_grid_size_i):
-        for j in range(final_grid_size_j):
-            if objectness[i, j].item() > thres:
-                centy = (i+preds_offsets[0, 0, i, j]).item()*scaled_img_height/final_grid_size_i
-                centx = (j+preds_offsets[0, 1, i, j]).item()*scaled_img_width /final_grid_size_j
-                width = th.square(preds_normalized_wh[0, 0, i, j]).item() * scaled_img_width
-                height= th.square(preds_normalized_wh[0, 1, i, j]).item() * scaled_img_height
-                top_left_x = centx-width/2
-                top_left_y = centy-height/2
-                bbox = [top_left_x, top_left_y, width, height]
-                category_id = int(class_id[i, j].item())
-                confidence = class_prob[i, j].item()*objectness[i, j].item()
-                ann_tmp = {'bbox':bbox, 'category_id':category_id, 'confidence':confidence}
-                annotations.append(ann_tmp)
+    bpreds_class_ids, bpreds_objectness, bpreds_offsets, bpreds_normalized_wh = yolo_output
+    batch_annotations = []
+    for tmp in zip(bpreds_class_ids, bpreds_objectness, bpreds_offsets, bpreds_normalized_wh):
+        preds_class_ids, preds_objectness, preds_offsets, preds_normalized_wh = tmp
 
-    return annotations
+        objectness = preds_objectness.squeeze(0)
+        class_id   = th.argmax(preds_class_ids, dim=0)
+        class_prob = th.max(preds_class_ids, dim=0)[0]
+        final_grid_size_i = int(objectness.shape[0])
+        final_grid_size_j = int(objectness.shape[1])
+        
+        annotations = []
+        for i in range(final_grid_size_i):
+            for j in range(final_grid_size_j):
+                if objectness[i, j].item() > thres:
+                    centy = (i+preds_offsets[0, i, j]).item()*scaled_img_height/final_grid_size_i
+                    centx = (j+preds_offsets[1, i, j]).item()*scaled_img_width /final_grid_size_j
+                    width = th.square(preds_normalized_wh[0, i, j]).item() * scaled_img_width
+                    height= th.square(preds_normalized_wh[1, i, j]).item() * scaled_img_height
+                    top_left_x = centx-width/2
+                    top_left_y = centy-height/2
+                    bbox = [top_left_x, top_left_y, width, height]
+                    category_id = int(class_id[i, j].item())
+                    confidence = class_prob[i, j].item()*objectness[i, j].item()
+                    ann_tmp = {'bbox':bbox, 'category_id':category_id, 'confidence':confidence}
+                    annotations.append(ann_tmp)
+        batch_annotations.append(annotations)
+    return batch_annotations
 
 
 
+def IoU(bbox1, bbox2):
+    x11, y11 = bbox1[0], bbox1[1]
+    x12, y12 = x11+bbox1[2], y11+bbox1[3]
+    x21, y21 = bbox2[0], bbox2[1]
+    x22, y22 = x21+bbox2[2], y21+bbox2[3]
+    xtop, ytop = max(x11, x21), max(y11, y21)
+    xbot, ybot = min(x12, x22), min(y12, y22)
 
+    if xtop<xbot and ytop<ybot:
+        intersection = (xbot-xtop)*(ybot-ytop)
+    else:
+        intersection = 0
+    area1 = bbox1[2]*bbox1[3]
+    area2 = bbox2[2]*bbox2[3]
+    union = area1 + area2 - intersection + 1e-9
+    return intersection/union
+
+
+
+def non_max_supression(annotations, thres=0.6):
+    torets = []
+    for annotation in annotations:
+        for i1, ann1 in enumerate(annotation):
+            for i2, ann2 in enumerate(annotation):
+                if i1 != i2:
+                    iou = IoU(ann1['bbox'], ann2['bbox'])
+                    if iou > thres:
+                        rem = ann1 if ann1['confidence']<ann2['confidence'] else ann2
+                        rem['confidence'] = -1
+                        rem['bbox'] = (0, 0, 1, 1)
+        toret = []
+        for ann in annotation:
+            if ann['confidence'] != -1:
+                toret.append(ann)
+        torets.append(toret)
+    return torets
 
 
