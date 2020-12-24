@@ -17,6 +17,8 @@ class ConvLayer(nn.Module):
         x = F.relu(x)
         return x
 
+
+
 class Yolo(nn.Module):
     def __init__(
         self, 
@@ -69,6 +71,8 @@ class Yolo(nn.Module):
         if separate:
             return class_preds, objectness, offsets, boxes
         return torch.cat((class_preds, objectness, offsets, boxes), dim=1)
+
+
 
 class Detector(nn.Module):
     def __init__(self, conv_list, device, backbone_strings=('pytorch/vision:v0.6.0', 'mobilenet_v2'), backbone_train=False):
